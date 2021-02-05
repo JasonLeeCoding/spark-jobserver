@@ -3,7 +3,9 @@ import scala.util.Properties.isJavaAtLeast
 object Versions {
   lazy val spark = sys.env.getOrElse("SPARK_VERSION", "2.4.4")
 
-  lazy val akka = "2.4.20"
+  lazy val akka = "2.5.32"
+  lazy val akkaHttp = "10.1.13"
+  lazy val akkaHttpCors = "0.4.2"
   lazy val cassandra = "3.3.0"
   lazy val commons = "1.4"
   lazy val derby = "10.12.1.1"
@@ -11,6 +13,8 @@ object Versions {
   lazy val hadoop = "2.7.3"
   lazy val h2 = "1.3.176"
   lazy val java = sys.env.getOrElse("JAVA_VERSION", "8-jdk")
+  lazy val jjwt = "0.9.1"
+  lazy val jwksRsa = "0.15.0"
   lazy val jodaConvert = "1.8.1"
   lazy val jodaTime = "2.9.3"
   lazy val logback = "1.0.7"
@@ -21,13 +25,12 @@ object Versions {
   lazy val py4j = "0.10.7"
   lazy val scalaTest = "3.0.1"
   lazy val scalatic = "3.0.1"
+  lazy val slf4j = "1.7.25"
   lazy val mockito = "2.21.0"
   lazy val shiro = "1.2.4"
-  lazy val slick = "3.1.1"
-  lazy val spray = "1.3.3"
-  lazy val sprayJson = "1.3.2"
+  lazy val slick = "3.3.3"
   lazy val typeSafeConfig = if (isJavaAtLeast("1.8")) "1.3.0" else "1.2.1"
-  lazy val cassandraConnector = "2.4.0"
+  lazy val cassandraConnector = "2.4.3"
   lazy val curator = "4.2.0"
   lazy val curatorTest = "4.2.0"
   lazy val xerces = "2.9.1"

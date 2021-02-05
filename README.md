@@ -36,7 +36,10 @@ Also see [Chinese docs / 中文](doc/chinese/job-server.md).
   - [HTTPS / SSL Configuration](#https--ssl-configuration)
     - [Server authentication](#server-authentication)
     - [Client authentication](#client-authentication)
-  - [Basic authentication](#basic-authentication)
+  - [Access control](#access-control)
+    - [Shiro](#shiro-authentication)
+    - [Keycloak](#keycloak-authentication)
+  - [User authorization](#user-authorization)
 - [Deployment](#deployment)
   - [Manual steps](#manual-steps)
   - [Context per JVM](#context-per-jvm)
@@ -106,7 +109,7 @@ Spark Job Server is included in Datastax Enterprise!
 - Works with Standalone Spark as well on [cluster](doc/cluster.md), [Mesos](doc/mesos.md), YARN [client](doc/yarn.md) and [on EMR](doc/EMR.md))
 - Job and jar info is persisted via a pluggable DAO interface
 - Named Objects (such as RDDs or DataFrames) to cache and retrieve RDDs or DataFrames by name, improving object sharing and reuse among jobs.
-- Supports Scala 2.10 and 2.11
+- Supports Scala 2.11 and 2.12
 - Support for supervise mode of Spark (EXPERIMENTAL)
 - Possible to be deployed in an [HA setup](#ha-deployment-beta) of multiple jobservers (beta)
 
@@ -182,7 +185,7 @@ Then go ahead and start the job server using the instructions above.
 
 Let's upload the jar:
 
-    curl -X POST localhost:8090/binaries/test -H "Content-Type: application/java-archive" --data-binary @job-server-tests/target/scala-2.10/job-server-tests-$VER.jar
+    curl -X POST localhost:8090/binaries/test -H "Content-Type: application/java-archive" --data-binary @job-server-tests/target/scala-2.12/job-server-tests_2.12-$VER.jar
     OK⏎
 
 #### Ad-hoc Mode - Single, Unrelated Jobs (Transient Context)
@@ -280,7 +283,7 @@ spark {
     context-init-timeout = 1000000 s
   }
 }
-spray.can.server {
+akka.http.server {
       # Debug timeouts
       idle-timeout = infinite
       request-timeout = infinite
@@ -514,7 +517,7 @@ def validate(sc:SparkContext, config: Config): SparkJobValidation = {
 
 ### HTTPS / SSL Configuration
 #### Server authentication
-To activate server authentication and ssl communication, set these flags in your application.conf file (Section 'spray.can.server'):
+To activate server authentication and ssl communication, set these flags in your application.conf file (Section 'akka.http.server'):
 ```
   ssl-encryption = on
   # absolute path to keystore file
@@ -543,13 +546,28 @@ The minimum set of parameters to enable client authentication consists of:
 ```
 Note, client authentication implies server authentication, therefore client authentication will only be enabled once server authentication is activated.
 
-### Basic authentication
-Basic authentication (username and password) in Job Server relies on the [Apache Shiro](http://shiro.apache.org/index.html) framework. 
-Basic authentication is activated by setting this flag (Section 'shiro'):
+### Access Control
+By default, access to the Job Server is not limited. Basic authentication (username and password) support is provided
+via the [Apache Shiro](http://shiro.apache.org/index.html) framework or [Keycloak](https://www.keycloak.org/). Both
+authentication frameworks have to be explicitly activated in the configuration file. 
+
+After the configuration, you can provide credentials via basic auth. Here is an example of a simple curl command that
+authenticates a user and uses ssl (you may want to use -H to hide the credentials, this is just a simple example to get
+you started):
 ```
-authentication = on
-# absolute path to shiro config file, including file name
-config.path = "/some/path/shiro.ini"
+curl -k --basic --user 'user:pw' https://localhost:8090/contexts
+```
+
+#### Shiro Authentication
+The Shiro Authenticator can be activated in the configuration file by changing the authentication provider and
+providing a shiro configuration file.
+```
+access-control {
+  provider = spark.jobserver.auth.ShiroAccessControl
+
+  # absolute path to shiro config file, including file name
+  shiro.config.path = "/some/path/shiro.ini"
+}
 ```
 Shiro-specific configuration options should be placed into a file named 'shiro.ini' in the directory as specified by the config option 'config.path'.
 Here is an example that configures LDAP with user group verification:
@@ -573,11 +591,46 @@ securityManager.cacheManager = $cacheManager
 
 Make sure to edit the url, credentials, userDnTemplate, ldap.allowedGroups and ldap.searchBase settings in accordance with your local setup.
 
-Here is an example of a simple curl command that authenticates a user and uses ssl (you may want to use -H to hide the
-credentials, this is just a simple example to get you started):
+The Shiro authenticator is able to perform fine-grained [user authorization](#user-authorization). Permissions are
+extracted from the provided user roles. Each role that matches a known permission is added to the authenticated user.
+Unknown roles are ignored. For a list of available permissions see [Permissions](doc/permissions.md).
+
+#### Keycloak Authentication
+The Keycloak Authenticator can be activated in the configuration file by changing the authentication provider and
+providing a keycloak configuration.
 ```
-curl -k --basic --user 'user:pw' https://localhost:8090/contexts
+access-control {
+  provider = spark.jobserver.auth.KeycloakAccessControl
+
+  keycloak {
+    authServerUrl = "https://example.com"
+    realmName = "master"
+    client = "client"
+    clientSecret = "secret"
+  }
+}
 ```
+| Name          | Description                                | Mandatory |
+|---------------|--------------------------------------------|-----------|
+| authServerUrl | The URL to reach the keycloak instance.    | yes       |
+| realmName     | The realm to authenticate against.         | yes       |
+| client        | The client to authenticate against.        | yes       |
+| clientSecret  | An according client secret, if it exists.  | no        |
+
+For better performance, authentication requests against Keycloak can be cached locally.
+
+The Keycloak authenticator is able to perform fine-grained [user authorization](#user-authorization). Permissions are
+extracted from the provided client's roles. Each client role that matches a known permission is added to the
+authenticated user. Unknown client roles are ignored. For a list of available permissions see
+[Permissions](doc/permissions.md).
+
+*Important:* If no client role matches a permission, the user is assigned the `ALLOW_ALL` role.
+
+### User Authorization
+Spark job server implements a basic authorization management system to control access to single resources. By default,
+users always have access to all resources (`ALLOW_ALL`). Authorization is implemented by checking the *permissions* of a
+user with the required permissions of an endpoint. For a detailed list of all available permissions see
+[Permissions](doc/permissions.md).
 
 ## Deployment
 
@@ -586,7 +639,7 @@ See also running on [cluster](doc/cluster.md), [YARN client](doc/yarn.md), on [E
 ### Manual steps
 
 1. Copy `config/local.sh.template` to `<environment>.sh` and edit as appropriate.  NOTE: be sure to set SPARK_VERSION if you need to compile against a different version.
-2. Copy `config/shiro.ini.template` to `shiro.ini` and edit as appropriate. NOTE: only required when `authentication = on`
+2. Copy `config/shiro.ini.template` to `shiro.ini` and edit as appropriate. NOTE: only required when `access-control.provider = spark.jobserver.auth.ShiroAccessControl`
 3. Copy `config/local.conf.template` to `<environment>.conf` and edit as appropriate.
 4. `bin/server_deploy.sh <environment>` -- this packages the job server along with config files and pushes
    it to the remotes you have configured in `<environment>.sh`
@@ -653,7 +706,7 @@ A comprehensive (manually created) swagger specification of the spark jobserver 
     POST /binaries/<appName>    - upload a new binary file
     DELETE /binaries/<appName>  - delete defined binary
 
-When POSTing new binaries, the content-type header must be set to one of the types supported by the subclasses of the `BinaryType` trait. e.g. "application/java-archive" or application/python-archive". If you are using curl command, then you must pass "-H 'Content-Type: application/python-archive'" or "-H 'Content-Type: application/java-archive'".
+When POSTing new binaries, the content-type header must be set to one of the types supported by the subclasses of the `BinaryType` trait. e.g. "application/java-archive",  "application/python-egg" or "application/python-wheel". If you are using curl command, then you must pass for example "-H 'Content-Type: application/python-wheel'".
 
 ### Contexts
 
@@ -760,7 +813,7 @@ User impersonation for an already Kerberos authenticated user is supported via `
 
   POST /contexts/my-new-context?spark.proxy.user=<user-to-impersonate>
 
-However, whenever the flag `shiro.use-as-proxy-user` is set to `on` (and authentication is `on`) then this parameter
+However, whenever the flag `access-control.shiro.use-as-proxy-user` is set to `on` (and Shiro is used as provider) then this parameter
 is ignored and the name of the authenticated user is *always* used as the value of the `spark.proxy.user`
 parameter when creating contexts.
 
@@ -836,7 +889,7 @@ Spark Jobserver programmatically.
 Contributions via Github Pull Request are welcome. Please start by taking a look at the [contribution guidelines](doc/contribution-guidelines.md) and check the TODO for some contribution ideas.
 
 - If you need to build with a specific scala version use ++x.xx.x followed by the regular command,
-for instance: `sbt ++2.11.6 job-server/compile`
+for instance: `sbt ++2.12.12 job-server/compile`
 - From the "master" project, please run "test" to ensure nothing is broken.
    - You may need to set `SPARK_LOCAL_IP` to `localhost` to ensure Akka port can bind successfully
    - Note for Windows users: very few tests fail on Windows. Thus, run `testOnly -- -l WindowsIgnore` from SBT shell to ignore them.

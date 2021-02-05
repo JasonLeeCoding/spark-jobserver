@@ -1,47 +1,65 @@
 package spark.jobserver.io
 
+import akka.http.scaladsl.model.MediaType.NotCompressible
+import akka.http.scaladsl.model.headers._
+import akka.http.scaladsl.model.{MediaType, MediaTypes}
 import org.joda.time.{DateTime, Duration}
 import spark.jobserver.util.ErrorData
-import spray.http.{HttpHeaders, MediaType, MediaTypes}
 
 trait BinaryType {
   def extension: String
   def name: String
-  def mediaType: MediaType
+  def mediaType: String
 }
 
 object BinaryType {
   case object Jar extends BinaryType {
     val extension = "jar"
     val name = "Jar"
-    val mediaType: MediaType = MediaTypes.register(MediaType.custom("application/java-archive"))
-    val contentType = HttpHeaders.`Content-Type`(mediaType)
+    val mediaType: String = MediaTypes.`application/java-archive`.value
+    @transient val contentType: `Content-Type` = `Content-Type`(MediaTypes
+      .`application/java-archive`.toContentType)
   }
 
   case object Egg extends BinaryType {
     val extension = "egg"
     val name = "Egg"
-    val mediaType: MediaType = MediaTypes.register(MediaType.custom("application/python-archive"))
-    val contentType = HttpHeaders.`Content-Type`(mediaType)
+    val mediaType: String = MediaType.applicationBinary("python-egg",
+      NotCompressible, "egg").value
+    @transient val contentType: `Content-Type` = `Content-Type`(MediaType.applicationBinary("python-egg",
+      NotCompressible, "egg").toContentType)
+  }
+
+  case object Wheel extends BinaryType {
+    val extension = "whl"
+    val name = "Wheel"
+    val mediaType: String = MediaType.applicationBinary("python-wheel",
+      NotCompressible, "whl").value
+    @transient val contentType: `Content-Type` = `Content-Type`(MediaType.applicationBinary("python-wheel",
+      NotCompressible, "whl").toContentType)
   }
 
   case object URI extends BinaryType {
     // WARNING: only for internal use (not accepted for upload from user)
     val extension = "uri"
     val name = "Uri"
-    val mediaType: MediaType = MediaTypes.register(MediaType.custom("text/uri-list"))
-    val contentType = HttpHeaders.`Content-Type`(mediaType)
+    val mediaType: String = MediaTypes.`text/uri-list`.value
+    @transient val contentType: `Content-Type` = `Content-Type`(MediaTypes
+      .`text/uri-list`.toContentTypeWithMissingCharset)
   }
 
   def fromString(typeString: String): BinaryType = typeString match {
-    case "Jar" => Jar
-    case "Egg" => Egg
-    case "Uri" => URI
+    case Jar.name => Jar
+    case Egg.name => Egg
+    case Wheel.name => Wheel
+    case URI.name => URI
   }
 
   def fromMediaType(mediaType: MediaType): Option[BinaryType] = mediaType match {
-    case m if m == Jar.mediaType => Some(Jar)
-    case m if m == Egg.mediaType => Some(Egg)
+    case m if m.value == Jar.mediaType => Some(Jar)
+    case m if m.value == Wheel.mediaType => Some(Wheel)
+    case m if m.value == Egg.mediaType => Some(Egg)
+    case m if m.value == "python-archive" => Some(Egg) // added for backward compatibility
     case _ => None
   }
 }

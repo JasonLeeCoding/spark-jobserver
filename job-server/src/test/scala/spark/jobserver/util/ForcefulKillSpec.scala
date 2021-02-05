@@ -1,19 +1,28 @@
 package spark.jobserver.util
 
+import java.nio.charset.Charset
+
+import akka.actor.ActorSystem
+import akka.http.scaladsl.model.{HttpEntity, HttpMethods, HttpRequest, HttpResponse, StatusCodes}
+import akka.testkit.TestKit
 import com.typesafe.config.{Config, ConfigFactory}
+
 import collection.JavaConverters._
 import org.joda.time.DateTime
-import org.scalatest.{FunSpec, Matchers}
+import org.scalatest.{BeforeAndAfterAll, FunSpecLike, Matchers}
 import spark.jobserver.io.ContextInfo
-import spray.client.pipelining.SendReceive
-import spray.http._
 
 object ForcefulKillSpec {
   val PRIMARY_MASTER = 0
   val SECONDARY_MASTER = 1
 }
 
-class ForcefulKillSpec extends FunSpec with Matchers {
+class ForcefulKillSpec extends TestKit(ActorSystem("test")) with FunSpecLike
+  with Matchers with BeforeAndAfterAll {
+
+  override def afterAll(): Unit = {
+    TestKit.shutdownActorSystem(system)
+  }
 
   def sparkUIJson(status: String = "ALIVE"): String =
     s"""
@@ -68,7 +77,7 @@ class ForcefulKillSpec extends FunSpec with Matchers {
     it("should handle gracefully if one or both masters are not in ALIVE state") {
       val helper = new StandaloneForcefulKill(buildConfig("spark://master1:8080,master2:8080"), "app-test") {
         var currentMaster = ForcefulKillSpec.PRIMARY_MASTER
-        override def doRequest(pipeline: SendReceive, req: HttpRequest): HttpResponse = {
+        override protected def doRequest(req: HttpRequest)(implicit system: ActorSystem): HttpResponse = {
           req.method match {
             case HttpMethods.GET =>
               currentMaster match {
@@ -98,7 +107,7 @@ class ForcefulKillSpec extends FunSpec with Matchers {
       // Note: The code doesn't work. Keep on returning the first IP
       val helper = new StandaloneForcefulKill(buildConfig("spark://master1:8080,master2:8080"), "app-test") {
         var currentMaster = ForcefulKillSpec.PRIMARY_MASTER
-        override def doRequest(pipeline: SendReceive, req: HttpRequest): HttpResponse = {
+        override protected def doRequest(req: HttpRequest)(implicit system: ActorSystem): HttpResponse = {
           req.method match {
             case HttpMethods.GET =>
               currentMaster match {
@@ -112,7 +121,8 @@ class ForcefulKillSpec extends FunSpec with Matchers {
               }
             case HttpMethods.POST =>
               req.uri.toString() should be("http://master2:8080/app/kill/")
-              req.entity.data.asString should be("id=app-test&terminate=true")
+              req.entity.asInstanceOf[HttpEntity.Strict].data
+                .decodeString(Charset.defaultCharset())should be("id=app-test&terminate=true")
               return HttpResponse(status = StatusCodes.Found)
           }
         }
@@ -123,7 +133,7 @@ class ForcefulKillSpec extends FunSpec with Matchers {
 
     it("should be able to kill the application if first master is not available or throws exception") {
       val helper = new StandaloneForcefulKill(buildConfig("spark://master1:8080,master2:8080"), "app-test") {
-        override protected def doRequest(pipeline: SendReceive, req: HttpRequest): HttpResponse = {
+        override protected def doRequest(req: HttpRequest)(implicit system: ActorSystem): HttpResponse = {
           req.uri.toString().contains("master1") match {
             case true => throw new Exception("deliberate failure")
             case false => return HttpResponse(entity = HttpEntity.apply(sparkUIJson()))
@@ -140,7 +150,7 @@ class ForcefulKillSpec extends FunSpec with Matchers {
                                failOnHTTPRequest: Boolean = false,
                                throwException: Boolean = false): StandaloneForcefulKill = {
     val helper = new StandaloneForcefulKill(buildConfig(s"spark://$masterAddressAndPort"), appId) {
-      override def doRequest(pipeline: SendReceive, req: HttpRequest): HttpResponse = {
+      override protected def doRequest(req: HttpRequest)(implicit system: ActorSystem): HttpResponse = {
         if (failOnHTTPRequest) fail("Request is not supposed to be sent")
         if (throwException) throw new Exception("deliberate failure")
 
@@ -150,7 +160,8 @@ class ForcefulKillSpec extends FunSpec with Matchers {
             return HttpResponse(entity = HttpEntity.apply(sparkUIJson()))
           case HttpMethods.POST =>
             req.uri.toString() should be(s"http://$masterAddressAndPort/app/kill/")
-            req.entity.data.asString should be("id=app-test&terminate=true")
+            req.entity.asInstanceOf[HttpEntity.Strict].data
+              .decodeString(Charset.defaultCharset()) should be("id=app-test&terminate=true")
             return HttpResponse(status = StatusCodes.Found)
         }
       }

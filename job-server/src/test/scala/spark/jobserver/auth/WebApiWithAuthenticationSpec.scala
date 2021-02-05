@@ -1,38 +1,34 @@
 package spark.jobserver.auth
 
 import java.util.concurrent.TimeoutException
-
 import akka.actor.{Actor, ActorSystem, Props}
+import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
+import akka.http.scaladsl.model.StatusCodes._
+import akka.http.scaladsl.model.headers.{Authorization, BasicHttpCredentials}
+import akka.http.scaladsl.server.Route
+import akka.http.scaladsl.server.Route.{seal => sealRoute}
+import akka.http.scaladsl.testkit.ScalatestRouteTest
 import akka.testkit.TestKit
-import com.typesafe.config.{ConfigFactory, ConfigValueFactory}
-import org.apache.shiro.SecurityUtils
-import org.apache.shiro.config.{Ini, IniSecurityManagerFactory}
+import com.typesafe.config.{Config, ConfigFactory, ConfigValueFactory}
 import org.joda.time.DateTime
 import org.scalatest.{BeforeAndAfterAll, FunSpec, Matchers}
-import org.slf4j.LoggerFactory
 import spark.jobserver._
+import spark.jobserver.auth.SJSAccessControl.Challenge
 import spark.jobserver.io.JobDAOActor.GetJobInfo
 import spark.jobserver.io.{BinaryInfo, BinaryType, JobInfo, JobStatus}
 import spark.jobserver.util.SparkJobUtils
-import spray.http.BasicHttpCredentials
-import spray.http.HttpHeaders.Authorization
-import spray.http.StatusCodes._
-import spray.routing.authentication.{BasicAuth, UserPass}
-import spray.routing.directives.AuthMagnet
-import spray.routing.{HttpService, Route}
-import spray.testkit.ScalatestRouteTest
 
 import scala.collection.mutable.SynchronizedSet
 import scala.concurrent.duration._
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future}
 
 // Tests authorization only, actual responses are tested elsewhere
 // Does NOT test underlying Supervisor / JarManager functionality
-// HttpService trait is needed for the sealRoute() which wraps exception handling
+// HttpService trait is needed for the seal() which wraps exception handling
 class WebApiWithAuthenticationSpec extends FunSpec with Matchers with BeforeAndAfterAll
-    with ScalatestRouteTest with HttpService {
-  import spray.httpx.SprayJsonSupport._
-  import spray.json.DefaultJsonProtocol._
+    with ScalatestRouteTest with SprayJsonSupport{
+  import spray.json._
+  import DefaultJsonProtocol._
 
   def actorRefFactory: ActorSystem = system
 
@@ -46,8 +42,9 @@ class WebApiWithAuthenticationSpec extends FunSpec with Matchers with BeforeAndA
       jobserver.bind-address = "${bindConfVal}"
       jobserver.short-timeout = 3 s
     }
-    shiro {
-      authentication = on
+    access-control {
+      auth-timeout = 10 s
+      shiro.config.path = "classpath:auth/dummy.ini"
     }
                                  """)
 
@@ -62,48 +59,46 @@ class WebApiWithAuthenticationSpec extends FunSpec with Matchers with BeforeAndA
   private val dummyActor = system.actorOf(Props(classOf[DummyActor], this))
 
   private def routesWithTimeout(useAsProxyUser: Boolean, authTimeout: Int): Route = {
-    val testConfig = config.withValue("shiro.authentication-timeout",
+    val testConfig = config.withValue("access-control.auth-timeout",
       ConfigValueFactory.fromAnyRef(authTimeout))
-      .withValue("shiro.use-as-proxy-user", ConfigValueFactory.fromAnyRef(useAsProxyUser))
-    val api = new WebApi(system, testConfig, dummyPort, dummyActor, dummyActor, dummyActor, dummyActor, null) {
-      private def asShiroAuthenticatorWithWait(authTimeout: Int)
-          (implicit ec: ExecutionContext): AuthMagnet[AuthInfo] = {
-        val logger = LoggerFactory.getLogger(getClass)
+      .withValue("access-control.shiro.use-as-proxy-user", ConfigValueFactory.fromAnyRef(useAsProxyUser))
+    val api = new WebApi(system, testConfig, dummyPort, dummyActor,
+      dummyActor, dummyActor, dummyActor, null) {
 
-        def validate(userPass: Option[UserPass]): Future[Option[AuthInfo]] = {
-          //if (!currentUser.isAuthenticated()) {
-          Future {
-            explicitValidation(userPass getOrElse UserPass("", ""), logger)
+      class MockedShiroAccessControl(override protected val authConfig: Config)
+                                    (implicit ec: ExecutionContext, s: ActorSystem)
+        extends ShiroAccessControl(authConfig)(ec, s){
+
+        override def challenge(): Challenge = {
+          credentials: Option[BasicHttpCredentials] => {
+            Future {
+              val userPass: BasicHttpCredentials = credentials match {
+                case Some(p) => p
+                case _ => BasicHttpCredentials("", "")
+              }
+              if (authTimeout > 0) {
+                val authInfo = authenticate(userPass) match {
+                  case Some(p) =>
+                    if (p.user.login == RESTRICTED_USER) {
+                      Some(new AuthInfo(User(RESTRICTED_USER), Set(Permissions.CONTEXTS)))
+                    }
+                    else {
+                      Some(p)
+                    }
+                  case None => None
+                }
+                cache.remove(userPass.username)
+                authInfo
+              } else {
+                throw new TimeoutException("forced timeout")
+              }
+            }
           }
         }
-
-        def authenticator(userPass: Option[UserPass]): Future[Option[AuthInfo]] = Future {
-          if (authTimeout > 0) {
-            Await.result(validate(userPass), authTimeout.seconds)
-          } else {
-            throw new TimeoutException("forced timeout")
-          }
-        }
-
-        BasicAuth(authenticator _, realm = "Shiro Private")
-      }
-      
-      override def initSecurityManager() {
-        val ini = {
-          val tmp = new Ini()
-          tmp.load(SJSAuthenticatorSpec.DummyIniConfig)
-          tmp
-        }
-        val factory = new IniSecurityManagerFactory(ini)
-
-        val sManager = factory.getInstance()
-        SecurityUtils.setSecurityManager(sManager)
       }
 
-      override lazy val authenticator: AuthMagnet[AuthInfo] = {
-        logger.info("Using authentication.")
-        initSecurityManager()
-        asShiroAuthenticatorWithWait(authTimeout)
+      override lazy val authenticator: Challenge = {
+        new MockedShiroAccessControl(testConfig.getConfig("access-control"))(ec, system).challenge()
       }
     }
     api.myRoutes
@@ -114,11 +109,14 @@ class WebApiWithAuthenticationSpec extends FunSpec with Matchers with BeforeAndA
 
   private val USER_NAME = "presidentskroob"
   private val USER_NAME_2 = USER_NAME + SparkJobUtils.NameContextDelimiter + "2"
+  private val RESTRICTED_USER = "barf"
 
   // set to some valid user
   private val authorization = new Authorization(new BasicHttpCredentials(USER_NAME, "12345"))
   private val authorizationInvalidPassword = new Authorization(new BasicHttpCredentials(USER_NAME, "xxx"))
   private val authorizationUnknownUser = new Authorization(new BasicHttpCredentials("whoami", "xxx"))
+  private val authorizationRestrictedUser = new Authorization(
+    new BasicHttpCredentials(RESTRICTED_USER, "12345"))
   private val dt = DateTime.parse("2013-05-29T00Z")
   private val jobInfo = JobInfo("foo-1", "cid", "context", "com.abc.meme",
       JobStatus.Running, dt, None, None, Seq(BinaryInfo("demo", BinaryType.Jar, dt)))
@@ -176,6 +174,14 @@ class WebApiWithAuthenticationSpec extends FunSpec with Matchers with BeforeAndA
         status should be (Unauthorized)
       }
     }
+
+    it("should not allow user with missing permissions") {
+      Post("/binaries/pyfoo", Array[Byte](0, 1, 2)).
+        withHeaders(authorizationRestrictedUser, BinaryType.Egg.contentType) ~>
+        sealRoute(routesWithProxyUser) ~> check {
+        status should be (Forbidden)
+      }
+    }
   }
 
   describe("/jobs routes") {
@@ -199,6 +205,13 @@ class WebApiWithAuthenticationSpec extends FunSpec with Matchers with BeforeAndA
       Delete("/jobs/job_to_kill").withHeaders(authorizationUnknownUser) ~>
         sealRoute(routesWithProxyUser) ~> check {
         status should be(Unauthorized)
+      }
+    }
+
+    it("should not allow user with missing permissions") {
+      Delete("/jobs/job_to_kill").withHeaders(authorizationRestrictedUser) ~>
+        sealRoute(routesWithProxyUser) ~> check {
+        status should be(Forbidden)
       }
     }
   }
@@ -415,6 +428,13 @@ class WebApiWithAuthenticationSpec extends FunSpec with Matchers with BeforeAndA
       Delete("/contexts/xxx").withHeaders(authorizationUnknownUser) ~>
         sealRoute(routesWithProxyUser) ~> check {
           status should be(Unauthorized)
+      }
+    }
+
+    it("should allow user with specific permissions") {
+      Delete("/contexts/xxx").withHeaders(authorizationRestrictedUser) ~>
+        sealRoute(routesWithProxyUser) ~> check {
+        status should be(OK)
       }
     }
 
